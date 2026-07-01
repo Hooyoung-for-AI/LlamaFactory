@@ -100,6 +100,13 @@ def _parse_args(
 
 
 def _set_transformers_logging() -> None:
+    quiet_startup = os.getenv("FUNAUDIOCHAT_QUIET_STARTUP", "1").strip().lower() not in {"0", "false", "no", "off"}
+    if quiet_startup:
+        # Keep HuggingFace processor/tokenizer/config reprs from dumping thousands of AddedToken lines.
+        # LLaMA-Factory's own logger still prints compact training summaries and metrics.
+        transformers.utils.logging.set_verbosity_error()
+        return
+
     if os.getenv("LLAMAFACTORY_VERBOSITY", "INFO") in ["DEBUG", "INFO"]:
         transformers.utils.logging.set_verbosity_info()
         transformers.utils.logging.enable_default_handler()

@@ -260,7 +260,8 @@ def _get_preprocessed_dataset(
         **kwargs,
     )
 
-    if training_args.should_log:
+    print_example = os.environ.get("FUNAUDIOCHAT_PRINT_DATA_EXAMPLE", "0").strip().lower() in {"1", "true", "yes", "on"}
+    if training_args.should_log and print_example:
         try:
             print("eval example:" if is_eval else "training example:")
             dataset_processor.print_data_example(next(iter(dataset)))

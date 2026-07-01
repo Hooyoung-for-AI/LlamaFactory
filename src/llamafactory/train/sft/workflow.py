@@ -26,7 +26,7 @@ from ...extras.ploting import plot_loss
 from ...model import load_model, load_tokenizer
 from ..trainer_utils import create_modelcard_and_push
 from .metric import ComputeAccuracy, ComputeSimilarity, eval_logit_processor
-from .trainer import CustomSeq2SeqTrainer
+from .trainer import CustomSeq2SeqTrainer, _get_funaudio_save_config
 
 
 if TYPE_CHECKING:
@@ -129,6 +129,8 @@ def run_sft(
             **metric_module,
         )
 
+    compact_save_only = bool(_get_funaudio_save_config().get("save_trained_modules_only", False))
+
     # Training
     if training_args.do_train:
         train_result = trainer.train(resume_from_checkpoint=training_args.resume_from_checkpoint)
@@ -139,10 +141,17 @@ def run_sft(
             )
 
         trainer.log_metrics("train", train_result.metrics)
-        trainer.save_metrics("train", train_result.metrics)
-        trainer.save_state()
-        if trainer.is_world_process_zero() and finetuning_args.plot_loss:
-            keys = ["loss"]
+        if not compact_save_only:
+            trainer.save_metrics("train", train_result.metrics)
+            trainer.save_state()
+        if not compact_save_only and trainer.is_world_process_zero() and finetuning_args.plot_loss:
+            keys = [
+                "loss",
+                "text_loss",
+                "speech_loss",
+                "listen_action_loss",
+                "speak_action_loss",
+            ]
             if isinstance(dataset_module.get("eval_dataset"), dict):
                 keys += sum(
                     [[f"eval_{key}_loss", f"eval_{key}_accuracy"] for key in dataset_module["eval_dataset"].keys()], []
@@ -159,15 +168,18 @@ def run_sft(
     if training_args.do_eval:
         metrics = trainer.evaluate(metric_key_prefix="eval", **gen_kwargs)
         trainer.log_metrics("eval", metrics)
-        trainer.save_metrics("eval", metrics)
+        if not compact_save_only:
+            trainer.save_metrics("eval", metrics)
 
     # Predict
     if training_args.do_predict:
         logger.warning_rank0_once("Batch generation can be very slow. Consider using `scripts/vllm_infer.py` instead.")
         predict_results = trainer.predict(dataset_module["eval_dataset"], metric_key_prefix="predict", **gen_kwargs)
         trainer.log_metrics("predict", predict_results.metrics)
-        trainer.save_metrics("predict", predict_results.metrics)
-        trainer.save_predictions(dataset_module["eval_dataset"], predict_results, generating_args.skip_special_tokens)
+        if not compact_save_only:
+            trainer.save_metrics("predict", predict_results.metrics)
+            trainer.save_predictions(dataset_module["eval_dataset"], predict_results, generating_args.skip_special_tokens)
 
     # Create model card
-    create_modelcard_and_push(trainer, model_args, data_args, training_args, finetuning_args)
+    if not compact_save_only:
+        create_modelcard_and_push(trainer, model_args, data_args, training_args, finetuning_args)

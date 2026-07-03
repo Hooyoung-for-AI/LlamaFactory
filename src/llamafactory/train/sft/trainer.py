@@ -153,9 +153,23 @@ def _get_funaudio_module_lrs() -> dict[str, float]:
         lora_lr = _read_lr("lora_llm", "lora_llm_learning_rate")
     if lora_lr is not None:
         lrs["lora"] = lora_lr
+
+    audio_invert_lr = _read_lr("audio_invert_tower", "audio_invert_tower_learning_rate")
+    if audio_invert_lr is not None:
+        lrs["audio_invert_tower"] = audio_invert_lr
+
     action_lr = _read_lr("action_refinement", "action_refinement_learning_rate")
-    if action_lr is not None:
-        lrs["action_refinement_head"] = action_lr
+    listen_action_lr = _read_lr("listen_action", "listen_action_learning_rate")
+    if listen_action_lr is None:
+        listen_action_lr = action_lr
+    if listen_action_lr is not None:
+        lrs["listen_action"] = listen_action_lr
+
+    speak_action_lr = _read_lr("speak_action", "speak_action_learning_rate")
+    if speak_action_lr is None:
+        speak_action_lr = action_lr
+    if speak_action_lr is not None:
+        lrs["speak_action"] = speak_action_lr
     return lrs
 
 
@@ -325,26 +339,35 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
 
         base_lr = float(self.args.learning_rate)
         lora_lr = module_lrs.get("lora", base_lr)
-        action_lr = module_lrs.get("action_refinement_head", base_lr)
+        audio_invert_lr = module_lrs.get("audio_invert_tower", base_lr)
+        listen_action_lr = module_lrs.get("listen_action", base_lr)
+        speak_action_lr = module_lrs.get("speak_action", base_lr)
         decay_param_names = set(_get_decay_parameter_names(self.model))
         grouped_params: dict[tuple[str, bool], list[torch.nn.Parameter]] = {
             ("base", True): [],
             ("base", False): [],
             ("lora", True): [],
             ("lora", False): [],
-            ("action_refinement_head", True): [],
-            ("action_refinement_head", False): [],
+            ("audio_invert_tower", True): [],
+            ("audio_invert_tower", False): [],
+            ("listen_action", True): [],
+            ("listen_action", False): [],
+            ("speak_action", True): [],
+            ("speak_action", False): [],
         }
 
         def _module_key(name: str) -> str:
             name = name.removeprefix("module.")
+            if name.startswith("audio_invert_tower."):
+                return "audio_invert_tower"
             if name.startswith((
                 "action_refinement_head.",
                 "listen_context_aggregator.",
                 "listen_action_refinement_head.",
-                "speak_action_refinement_head.",
             )):
-                return "action_refinement_head"
+                return "listen_action"
+            if name.startswith("speak_action_refinement_head."):
+                return "speak_action"
             if "lora_" in name or ".lora_" in name:
                 return "lora"
             return "base"
@@ -357,7 +380,9 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         group_lrs = {
             "base": base_lr,
             "lora": lora_lr,
-            "action_refinement_head": action_lr,
+            "audio_invert_tower": audio_invert_lr,
+            "listen_action": listen_action_lr,
+            "speak_action": speak_action_lr,
         }
         param_groups = []
         param_counts: dict[str, int] = {key: 0 for key in group_lrs}
@@ -380,9 +405,17 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
 
         if "lora" in module_lrs and param_counts['lora'] == 0:
             logger.warning_rank0("lora learning_rate was set, but no trainable LoRA parameters were found.")
-        if "action_refinement_head" in module_lrs and param_counts['action_refinement_head'] == 0:
+        if "audio_invert_tower" in module_lrs and param_counts['audio_invert_tower'] == 0:
             logger.warning_rank0(
-                "action_refinement learning_rate was set, but no trainable action_refinement_head parameters were found."
+                "audio_invert_tower learning_rate was set, but no trainable audio_invert_tower parameters were found."
+            )
+        if "listen_action" in module_lrs and param_counts['listen_action'] == 0:
+            logger.warning_rank0(
+                "listen_action learning_rate was set, but no trainable listen action parameters were found."
+            )
+        if "speak_action" in module_lrs and param_counts['speak_action'] == 0:
+            logger.warning_rank0(
+                "speak_action learning_rate was set, but no trainable speak_action_refinement_head parameters were found."
             )
 
         optim_class, optim_kwargs = Seq2SeqTrainer.get_optimizer_cls_and_kwargs(self.args, self.model)
@@ -390,10 +423,12 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         lr_parts = [f"base={base_lr:.3e} ({param_counts['base']} params)"]
         if param_counts['lora'] > 0 or "lora" in module_lrs:
             lr_parts.append(f"lora={lora_lr:.3e} ({param_counts['lora']} params)")
-        if param_counts['action_refinement_head'] > 0 or "action_refinement_head" in module_lrs:
-            lr_parts.append(
-                f"action_refinement_head={action_lr:.3e} ({param_counts['action_refinement_head']} params)"
-            )
+        if param_counts['audio_invert_tower'] > 0 or "audio_invert_tower" in module_lrs:
+            lr_parts.append(f"audio_invert_tower={audio_invert_lr:.3e} ({param_counts['audio_invert_tower']} params)")
+        if param_counts['listen_action'] > 0 or "listen_action" in module_lrs:
+            lr_parts.append(f"listen_action={listen_action_lr:.3e} ({param_counts['listen_action']} params)")
+        if param_counts['speak_action'] > 0 or "speak_action" in module_lrs:
+            lr_parts.append(f"speak_action={speak_action_lr:.3e} ({param_counts['speak_action']} params)")
         logger.info_rank0("Using FunAudioChat module-wise learning rates: %s.", ", ".join(lr_parts))
         return optimizer
 

@@ -170,6 +170,14 @@ def _get_funaudio_module_lrs() -> dict[str, float]:
         speak_action_lr = action_lr
     if speak_action_lr is not None:
         lrs["speak_action"] = speak_action_lr
+
+    listen_semantic_lr = _read_lr("listen_semantic", "listen_semantic_learning_rate")
+    if listen_semantic_lr is not None:
+        lrs["listen_semantic"] = listen_semantic_lr
+
+    speak_input_gate_lr = _read_lr("speak_input_gate", "speak_input_gate_learning_rate")
+    if speak_input_gate_lr is not None:
+        lrs["speak_input_gate"] = speak_input_gate_lr
     return lrs
 
 
@@ -239,6 +247,7 @@ _FUN_AUDIO_CONFIG_KEYS = [
     "action_refinement_xavier_init",
     "action_refinement_zero_init_adaln",
     "action_refinement_detach_condition_for_speak",
+    "action_refinement_speak_condition_dropout",
     "action_refinement_label_mask",
     "action_refinement_loss_weight",
     "freeze_audio_modules",
@@ -342,6 +351,8 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         audio_invert_lr = module_lrs.get("audio_invert_tower", base_lr)
         listen_action_lr = module_lrs.get("listen_action", base_lr)
         speak_action_lr = module_lrs.get("speak_action", base_lr)
+        listen_semantic_lr = module_lrs.get("listen_semantic", listen_action_lr)
+        speak_input_gate_lr = module_lrs.get("speak_input_gate", speak_action_lr)
         decay_param_names = set(_get_decay_parameter_names(self.model))
         grouped_params: dict[tuple[str, bool], list[torch.nn.Parameter]] = {
             ("base", True): [],
@@ -354,12 +365,23 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
             ("listen_action", False): [],
             ("speak_action", True): [],
             ("speak_action", False): [],
+            ("listen_semantic", True): [],
+            ("listen_semantic", False): [],
+            ("speak_input_gate", True): [],
+            ("speak_input_gate", False): [],
         }
 
         def _module_key(name: str) -> str:
             name = name.removeprefix("module.")
             if name.startswith("audio_invert_tower."):
                 return "audio_invert_tower"
+            if name.startswith((
+                "listen_action_refinement_head.semantic_gate",
+                "listen_action_refinement_head.semantic_cond_proj.",
+            )):
+                return "listen_semantic"
+            if name == "speak_action_refinement_head.input_gate":
+                return "speak_input_gate"
             if name.startswith((
                 "action_refinement_head.",
                 "listen_context_aggregator.",
@@ -383,6 +405,8 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
             "audio_invert_tower": audio_invert_lr,
             "listen_action": listen_action_lr,
             "speak_action": speak_action_lr,
+            "listen_semantic": listen_semantic_lr,
+            "speak_input_gate": speak_input_gate_lr,
         }
         param_groups = []
         param_counts: dict[str, int] = {key: 0 for key in group_lrs}
@@ -417,6 +441,14 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
             logger.warning_rank0(
                 "speak_action learning_rate was set, but no trainable speak_action_refinement_head parameters were found."
             )
+        if "listen_semantic" in module_lrs and param_counts['listen_semantic'] == 0:
+            logger.warning_rank0(
+                "listen_semantic learning_rate was set, but no trainable listen semantic parameters were found."
+            )
+        if "speak_input_gate" in module_lrs and param_counts['speak_input_gate'] == 0:
+            logger.warning_rank0(
+                "speak_input_gate learning_rate was set, but speak_action_refinement_head.input_gate was not trainable."
+            )
 
         optim_class, optim_kwargs = Seq2SeqTrainer.get_optimizer_cls_and_kwargs(self.args, self.model)
         optimizer = optim_class(param_groups, **optim_kwargs)
@@ -429,6 +461,10 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
             lr_parts.append(f"listen_action={listen_action_lr:.3e} ({param_counts['listen_action']} params)")
         if param_counts['speak_action'] > 0 or "speak_action" in module_lrs:
             lr_parts.append(f"speak_action={speak_action_lr:.3e} ({param_counts['speak_action']} params)")
+        if param_counts['listen_semantic'] > 0 or "listen_semantic" in module_lrs:
+            lr_parts.append(f"listen_semantic={listen_semantic_lr:.3e} ({param_counts['listen_semantic']} params)")
+        if param_counts['speak_input_gate'] > 0 or "speak_input_gate" in module_lrs:
+            lr_parts.append(f"speak_input_gate={speak_input_gate_lr:.3e} ({param_counts['speak_input_gate']} params)")
         logger.info_rank0("Using FunAudioChat module-wise learning rates: %s.", ", ".join(lr_parts))
         return optimizer
 

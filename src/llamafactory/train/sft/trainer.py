@@ -118,14 +118,10 @@ def _get_trainable_bucket(name: str) -> str:
         return "audio_invert_lora" if is_lora else "audio_invert_tower"
     if is_lora:
         return "llm_lora"
-    if name.startswith("listen_context_aggregator."):
-        return "listen_context_aggregator"
     if name.startswith("listen_action_refinement_head."):
         return "listen_action_refinement_head"
     if name.startswith("speak_action_refinement_head."):
         return "speak_action_refinement_head"
-    if name.startswith("action_refinement_head."):
-        return "action_refinement_head"
     return "other_trainable"
 
 
@@ -171,10 +167,6 @@ def _get_funaudio_module_lrs() -> dict[str, float]:
     if speak_action_lr is not None:
         lrs["speak_action"] = speak_action_lr
 
-    listen_semantic_lr = _read_lr("listen_semantic", "listen_semantic_learning_rate")
-    if listen_semantic_lr is not None:
-        lrs["listen_semantic"] = listen_semantic_lr
-
     speak_input_gate_lr = _read_lr("speak_input_gate", "speak_input_gate_learning_rate")
     if speak_input_gate_lr is not None:
         lrs["speak_input_gate"] = speak_input_gate_lr
@@ -216,33 +208,34 @@ _FUN_AUDIO_CONFIG_KEYS = [
     "action_refinement_listen_num_heads",
     "action_refinement_listen_num_layers",
     "action_refinement_listen_dropout",
-    "action_refinement_listen_context_enabled",
-    "action_refinement_listen_context_num_heads",
-    "action_refinement_listen_context_num_layers",
-    "action_refinement_listen_context_dropout",
-    "action_refinement_listen_context_audio_gate_init",
-    "action_refinement_listen_rollout_horizon",
-    "action_refinement_listen_rollout_loss_weight",
-    "action_refinement_listen_rollout_batch_prob",
+    "action_refinement_listen_block_size_frames",
+    "action_refinement_listen_context_blocks",
+    "action_refinement_listen_history_num_layers",
+    "action_refinement_listen_query_generator_num_layers",
+    "action_refinement_listen_history_token_corruption",
+    "action_refinement_listen_history_frame_dropout",
+    "action_refinement_listen_history_condition_dropout",
+    "action_refinement_listen_condition_frame_dropout",
+    "action_refinement_listen_condition_noise_std",
+    "action_refinement_listen_audio_frame_dropout",
+    "action_refinement_listen_audio_noise_std",
+    "action_refinement_listen_self_copy_margin_weight",
+    "action_refinement_listen_block_copy_margin_weight",
+    "action_refinement_listen_self_copy_logit_margin",
+    "action_refinement_listen_block_copy_logit_margin",
+    "action_refinement_listen_label_smoothing",
     "action_refinement_speak_hidden_size",
     "action_refinement_speak_num_heads",
     "action_refinement_speak_num_layers",
     "action_refinement_speak_dropout",
-    "action_refinement_listen_arch",
-    "action_refinement_listen_input_source",
-    "action_refinement_route_for_listen",
-    "action_refinement_route_for_speak",
     "action_refinement_default_mode",
-    "action_refinement_separate_listen_speak",
     "action_refinement_use_prev_action",
     "action_refinement_enable_motion_buffer",
     "action_refinement_enable_adaln",
-    "action_refinement_listen_zero_condition",
     "action_refinement_detach_backbone_for_listen",
     "action_refinement_detach_backbone_for_speak",
     "action_refinement_speak_backbone_grad_scale",
     "action_refinement_speak_use_text_embeds",
-    "action_refinement_listen_fp32",
     "action_refinement_input_norm",
     "action_refinement_input_gate_init",
     "action_refinement_condition_gate_init",
@@ -329,14 +322,12 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         self._funaudio_grad_buffer = {}
         if self._should_log_funaudio_grad_norms():
             self._funaudio_grad_buffer = {
-                "listen_context_grad_norm": [],
                 "listen_action_grad_norm": [],
                 "speak_action_grad_norm": [],
                 "action_grad_norm": [],
                 "audio_invert_grad_norm": [],
                 "llm_lora_grad_norm": [],
                 "other_grad_norm": [],
-                "listen_context_grad_nonfinite": [],
                 "listen_action_grad_nonfinite": [],
                 "speak_action_grad_nonfinite": [],
                 "action_grad_nonfinite": [],
@@ -354,7 +345,6 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         audio_invert_lr = module_lrs.get("audio_invert_tower", base_lr)
         listen_action_lr = module_lrs.get("listen_action", base_lr)
         speak_action_lr = module_lrs.get("speak_action", base_lr)
-        listen_semantic_lr = module_lrs.get("listen_semantic", listen_action_lr)
         speak_input_gate_lr = module_lrs.get("speak_input_gate", speak_action_lr)
         decay_param_names = set(_get_decay_parameter_names(self.model))
         grouped_params: dict[tuple[str, bool], list[torch.nn.Parameter]] = {
@@ -368,8 +358,6 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
             ("listen_action", False): [],
             ("speak_action", True): [],
             ("speak_action", False): [],
-            ("listen_semantic", True): [],
-            ("listen_semantic", False): [],
             ("speak_input_gate", True): [],
             ("speak_input_gate", False): [],
         }
@@ -378,18 +366,9 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
             name = name.removeprefix("module.")
             if name.startswith("audio_invert_tower."):
                 return "audio_invert_tower"
-            if name.startswith((
-                "listen_action_refinement_head.semantic_gate",
-                "listen_action_refinement_head.semantic_cond_proj.",
-            )):
-                return "listen_semantic"
             if name == "speak_action_refinement_head.input_gate":
                 return "speak_input_gate"
-            if name.startswith((
-                "action_refinement_head.",
-                "listen_context_aggregator.",
-                "listen_action_refinement_head.",
-            )):
+            if name.startswith("listen_action_refinement_head."):
                 return "listen_action"
             if name.startswith("speak_action_refinement_head."):
                 return "speak_action"
@@ -408,7 +387,6 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
             "audio_invert_tower": audio_invert_lr,
             "listen_action": listen_action_lr,
             "speak_action": speak_action_lr,
-            "listen_semantic": listen_semantic_lr,
             "speak_input_gate": speak_input_gate_lr,
         }
         param_groups = []
@@ -444,10 +422,6 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
             logger.warning_rank0(
                 "speak_action learning_rate was set, but no trainable speak_action_refinement_head parameters were found."
             )
-        if "listen_semantic" in module_lrs and param_counts['listen_semantic'] == 0:
-            logger.warning_rank0(
-                "listen_semantic learning_rate was set, but no trainable listen semantic parameters were found."
-            )
         if "speak_input_gate" in module_lrs and param_counts['speak_input_gate'] == 0:
             logger.warning_rank0(
                 "speak_input_gate learning_rate was set, but speak_action_refinement_head.input_gate was not trainable."
@@ -464,8 +438,6 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
             lr_parts.append(f"listen_action={listen_action_lr:.3e} ({param_counts['listen_action']} params)")
         if param_counts['speak_action'] > 0 or "speak_action" in module_lrs:
             lr_parts.append(f"speak_action={speak_action_lr:.3e} ({param_counts['speak_action']} params)")
-        if param_counts['listen_semantic'] > 0 or "listen_semantic" in module_lrs:
-            lr_parts.append(f"listen_semantic={listen_semantic_lr:.3e} ({param_counts['listen_semantic']} params)")
         if param_counts['speak_input_gate'] > 0 or "speak_input_gate" in module_lrs:
             lr_parts.append(f"speak_input_gate={speak_input_gate_lr:.3e} ({param_counts['speak_input_gate']} params)")
         logger.info_rank0("Using FunAudioChat module-wise learning rates: %s.", ", ".join(lr_parts))
@@ -581,14 +553,10 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
     @staticmethod
     def _get_funaudio_grad_bucket(name: str) -> str:
         name = name.removeprefix("module.")
-        if name.startswith("listen_context_aggregator."):
-            return "listen_context_grad_norm"
         if name.startswith("listen_action_refinement_head."):
             return "listen_action_grad_norm"
         if name.startswith("speak_action_refinement_head."):
             return "speak_action_grad_norm"
-        if name.startswith("action_refinement_head."):
-            return "action_grad_norm"
         if name.startswith("audio_invert_tower."):
             return "audio_invert_grad_norm"
         if "lora_" in name or ".lora_" in name:
@@ -703,7 +671,6 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
             return False
         prefixes = (
             "language_model.",
-            "listen_context_aggregator.",
             "listen_action_refinement_head.",
             "speak_action_refinement_head.",
             "audio_invert_tower.",
@@ -883,7 +850,6 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
             module_files["audio_invert_tower_lora"] = os.path.join(trained_modules_dir, "audio_invert_tower_lora", weight_name)
 
         module_specs = {
-            "listen_context_aggregator": (("listen_context_aggregator.",), False),
             "listen_action_refinement_head": (("listen_action_refinement_head.",), False),
             "speak_action_refinement_head": (("speak_action_refinement_head.",), False),
         }

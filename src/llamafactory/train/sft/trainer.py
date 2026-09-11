@@ -28,6 +28,7 @@ import torch
 import yaml
 from safetensors.torch import save_file as safe_save_file
 from transformers import Seq2SeqTrainer
+from training.action_evaluation import ActionEvaluationMixin
 from typing_extensions import override
 
 from ...extras import logging
@@ -253,7 +254,7 @@ _FUN_AUDIO_CONFIG_KEYS = [
 ]
 
 
-class CustomSeq2SeqTrainer(Seq2SeqTrainer):
+class CustomSeq2SeqTrainer(ActionEvaluationMixin, Seq2SeqTrainer):
     r"""Inherits Seq2SeqTrainer to compute generative metrics such as BLEU and ROUGE."""
 
     def _iter_funaudio_named_parameters(self):
@@ -571,7 +572,10 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
         except TypeError:
             train_samples = "streaming"
         try:
-            eval_samples = f"{len(self.eval_dataset):,}" if self.eval_dataset is not None else "none"
+            if isinstance(self.eval_dataset, dict):
+                eval_samples = ", ".join(f"{name}={len(dataset):,}" for name, dataset in self.eval_dataset.items())
+            else:
+                eval_samples = f"{len(self.eval_dataset):,}" if self.eval_dataset is not None else "none"
         except TypeError:
             eval_samples = "streaming"
 
@@ -1299,6 +1303,15 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
             loss = outputs.get("loss")
         if loss is None:
             raise ValueError("FunAudioChat model returned no loss from the training batch.")
+        if getattr(self, "_action_eval_active", False) and getattr(self.model.config, "action_flow_feature_only", False):
+            # Stage 1 optimizes only action heads; eval mode also computes text
+            # and speech diagnostics, which must not change its selection loss.
+            terms = [getattr(outputs, f"{mode}_flow_loss", None) for mode in ("listen", "speak")]
+            terms = [term * float(getattr(self.model.config, f"{mode}_flow_loss_weight"))
+                     for mode, term in zip(("listen", "speak"), terms) if term is not None]
+            if not terms:
+                raise ValueError("Stage 1 validation example has no action supervision after preprocessing.")
+            loss = sum(terms)
         if not bool(torch.isfinite(loss.detach()).all()):
             nonfinite_components = []
             for name in (
@@ -1316,9 +1329,22 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
             raise FloatingPointError(
                 f"FunAudioChat produced a non-finite training loss ({detail})."
             )
-        self._record_funaudio_losses(outputs)
-        self._record_funaudio_per_loss_grad_norms(outputs, model=model)
+        if model.training and not getattr(self, "_action_eval_active", False):
+            self._record_funaudio_losses(outputs)
+            self._record_funaudio_per_loss_grad_norms(outputs, model=model)
         return (loss, outputs) if return_outputs else loss
+
+    @override
+    def train(self, *args, **kwargs):
+        if not bool(getattr(self.model.config, "enable_action_flow_heads", False)):
+            return super().train(*args, **kwargs)
+        from funaudiochat.action_utils.memory_debug import memory_debug_enabled, trace_cuda_memory
+
+        if not memory_debug_enabled():
+            return super().train(*args, **kwargs)
+        parameter = next(self.model.parameters())
+        with trace_cuda_memory("trainer.train", parameter):
+            return super().train(*args, **kwargs)
 
     @override
     def training_step(self, model, inputs, *args, **kwargs):
@@ -1370,6 +1396,8 @@ class CustomSeq2SeqTrainer(Seq2SeqTrainer):
 
         Subclass and override to inject custom behavior.
         """
+        if getattr(self, "_action_eval_active", False):
+            return self._action_prediction_step(model, inputs)
         if self.args.predict_with_generate:  # do not pass labels to model when generate
             labels = inputs.pop("labels", None)
         else:

@@ -213,9 +213,6 @@ _FUN_AUDIO_CONFIG_KEYS = [
     "action_flow_dropout",
     "action_flow_rope_base",
     "action_flow_qk_norm",
-    "action_flow_llm_dropout",
-    "action_flow_audio_dropout",
-    "action_flow_history_dropout",
     "action_flow_chunks_per_motion",
     "action_flow_timestep_distribution",
     "action_flow_sigmoid_normal_mean",
@@ -233,18 +230,6 @@ _FUN_AUDIO_CONFIG_KEYS = [
     "speak_flow_steps",
     "listen_flow_temperature",
     "speak_flow_temperature",
-    "listen_flow_boundary_loss_weight",
-    "speak_flow_boundary_loss_weight",
-    "speak_flow_expression_loss_weight",
-    "speak_flow_jaw_loss_weight",
-    "speak_flow_pose_loss_weight",
-    "speak_flow_eyelid_loss_weight",
-    "speak_flow_lve_loss_weight",
-    "speak_flow_mod_loss_weight",
-    "speak_flow_temporal_velocity_loss_weight",
-    "speak_flow_temporal_acceleration_loss_weight",
-    "speak_flow_expression_jaw_loss_weight",
-    "speak_flow_lip_vertex_loss_weight",
     "listen_flow_anchor_strength",
     "speak_flow_anchor_strength",
     "codec_decode_context_latents",
@@ -351,28 +336,6 @@ class CustomSeq2SeqTrainer(ActionEvaluationMixin, Seq2SeqTrainer):
             "speak_flow_loss": [],
             "listen_flow_velocity": [],
             "speak_flow_velocity": [],
-            "listen_boundary_loss": [],
-            "speak_boundary_loss": [],
-            "listen_expression_jaw_loss": [],
-            "speak_expression_jaw_loss": [],
-            "listen_expression_loss": [],
-            "speak_expression_loss": [],
-            "listen_jaw_loss": [],
-            "speak_jaw_loss": [],
-            "listen_pose_loss": [],
-            "speak_pose_loss": [],
-            "listen_eyelid_loss": [],
-            "speak_eyelid_loss": [],
-            "listen_lve_loss": [],
-            "speak_lve_loss": [],
-            "listen_mod_loss": [],
-            "speak_mod_loss": [],
-            "listen_temporal_velocity_loss": [],
-            "speak_temporal_velocity_loss": [],
-            "listen_temporal_acceleration_loss": [],
-            "speak_temporal_acceleration_loss": [],
-            "listen_lip_vertex_loss": [],
-            "speak_lip_vertex_loss": [],
         }
         self._funaudio_grad_buffer = {}
         if self._should_log_funaudio_grad_norms():
@@ -653,36 +616,17 @@ class CustomSeq2SeqTrainer(ActionEvaluationMixin, Seq2SeqTrainer):
             metrics = getattr(outputs, f"{mode}_flow_metrics", None)
             if not isinstance(metrics, dict):
                 continue
-            for metric, log_name in (
-                ("flow_velocity", f"{mode}_flow_velocity"),
-                ("boundary_loss", f"{mode}_boundary_loss"),
-                ("expression_loss", f"{mode}_expression_loss"),
-                ("jaw_loss", f"{mode}_jaw_loss"),
-                ("pose_loss", f"{mode}_pose_loss"),
-                ("eyelid_loss", f"{mode}_eyelid_loss"),
-                ("lve_loss", f"{mode}_lve_loss"),
-                ("mod_loss", f"{mode}_mod_loss"),
-                ("temporal_velocity_loss", f"{mode}_temporal_velocity_loss"),
-                (
-                    "temporal_acceleration_loss",
-                    f"{mode}_temporal_acceleration_loss",
-                ),
-                ("expression_jaw_loss", f"{mode}_expression_jaw_loss"),
-                ("lip_vertex_loss", f"{mode}_lip_vertex_loss"),
-            ):
-                value = metrics.get(metric)
-                if value is None:
-                    continue
+            value = metrics.get("flow_velocity")
+            if value is not None:
                 if torch.is_tensor(value):
-                    if value.numel() == 0:
-                        continue
-                    value = value.detach().float().mean().item()
-                try:
-                    self._funaudio_loss_buffer.setdefault(log_name, []).append(
-                        float(value)
-                    )
-                except (TypeError, ValueError):
-                    continue
+                    value = value.detach().float().mean().item() if value.numel() else None
+                if value is not None:
+                    try:
+                        self._funaudio_loss_buffer.setdefault(
+                            f"{mode}_flow_velocity", []
+                        ).append(float(value))
+                    except (TypeError, ValueError):
+                        pass
             for metric in (
                 "noisy_action_grad_norm",
                 "action_noise_grad_norm",
@@ -1302,16 +1246,12 @@ class CustomSeq2SeqTrainer(ActionEvaluationMixin, Seq2SeqTrainer):
         if loss is None and isinstance(outputs, dict):
             loss = outputs.get("loss")
         if loss is None:
-            raise ValueError("FunAudioChat model returned no loss from the training batch.")
-        if getattr(self, "_action_eval_active", False) and getattr(self.model.config, "action_flow_feature_only", False):
-            # Stage 1 optimizes only action heads; eval mode also computes text
-            # and speech diagnostics, which must not change its selection loss.
-            terms = [getattr(outputs, f"{mode}_flow_loss", None) for mode in ("listen", "speak")]
-            terms = [term * float(getattr(self.model.config, f"{mode}_flow_loss_weight"))
-                     for mode, term in zip(("listen", "speak"), terms) if term is not None]
-            if not terms:
+            # Stage 1 optimizes only the action heads, so a feature-only
+            # validation example with no action supervision produces no loss at
+            # all rather than a text/speech fallback.
+            if getattr(self, "_action_eval_active", False) and getattr(self.model.config, "action_flow_feature_only", False):
                 raise ValueError("Stage 1 validation example has no action supervision after preprocessing.")
-            loss = sum(terms)
+            raise ValueError("FunAudioChat model returned no loss from the training batch.")
         if not bool(torch.isfinite(loss.detach()).all()):
             nonfinite_components = []
             for name in (
@@ -1329,8 +1269,12 @@ class CustomSeq2SeqTrainer(ActionEvaluationMixin, Seq2SeqTrainer):
             raise FloatingPointError(
                 f"FunAudioChat produced a non-finite training loss ({detail})."
             )
-        if model.training and not getattr(self, "_action_eval_active", False):
+        if model.training or getattr(self, "_action_eval_active", False):
+            # Evaluation records its components too, so the ``eval_`` flush in
+            # ``_flush_funaudio_loss_logs`` can report eval_listen_flow_loss and
+            # friends instead of only the scalar ``eval_loss``.
             self._record_funaudio_losses(outputs)
+        if model.training and not getattr(self, "_action_eval_active", False):
             self._record_funaudio_per_loss_grad_norms(outputs, model=model)
         return (loss, outputs) if return_outputs else loss
 
@@ -1367,11 +1311,6 @@ class CustomSeq2SeqTrainer(ActionEvaluationMixin, Seq2SeqTrainer):
                 key in {"learning_rate", "lr"}
                 or key.endswith("_grad_norm")
                 or key.endswith("_grad_rms")
-                or "lip_vertex_loss" in key
-                or key.endswith("_lve_loss")
-                or key.endswith("_mod_loss")
-                or key.endswith("_temporal_velocity_loss")
-                or key.endswith("_temporal_acceleration_loss")
             ):
                 logs[key] = cls._round_significant(value, digits=5)
             else:

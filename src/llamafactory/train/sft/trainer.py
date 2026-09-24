@@ -199,6 +199,7 @@ def _get_funaudio_save_config() -> dict[str, Any]:
 
 
 _FUN_AUDIO_CONFIG_KEYS = [
+    "speak_action_history_tokens",
     "enable_action_flow_heads",
     "speak_flow_architecture",
     "action_codec_checkpoint",
@@ -224,6 +225,8 @@ _FUN_AUDIO_CONFIG_KEYS = [
     "action_flow_persistent_residual_init",
     "action_default_mode",
     "speak_action_audio_condition_layers",
+    "text_loss_weight",
+    "speech_loss_weight",
     "listen_flow_loss_weight",
     "speak_flow_loss_weight",
     "listen_flow_steps",
@@ -663,9 +666,10 @@ class CustomSeq2SeqTrainer(ActionEvaluationMixin, Seq2SeqTrainer):
             return
         if "loss" in logs:
             prefix = ""
-        elif "eval_loss" in logs:
-            prefix = "eval_"
         else:
+            # Evaluation already aggregates across ranks with explicit counts.
+            # Never overwrite it with this local training-only buffer, and keep
+            # pending training values for the next training log.
             return
         for key, values in self._funaudio_loss_buffer.items():
             if not values:
@@ -1135,7 +1139,7 @@ class CustomSeq2SeqTrainer(ActionEvaluationMixin, Seq2SeqTrainer):
             state_dict = unwrapped.state_dict()
         language_model = getattr(unwrapped, "language_model", None)
         llm_finetuning = save_config["llm_finetuning"]
-        if llm_finetuning == "full":
+        if llm_finetuning == "full" or getattr(unwrapped, "_funaudio_preserve_full_llm", False):
             if language_model is None or not hasattr(language_model, "save_pretrained"):
                 raise RuntimeError(
                     "Full LLM fine-tuning requires a save_pretrained-compatible "
@@ -1269,10 +1273,7 @@ class CustomSeq2SeqTrainer(ActionEvaluationMixin, Seq2SeqTrainer):
             raise FloatingPointError(
                 f"FunAudioChat produced a non-finite training loss ({detail})."
             )
-        if model.training or getattr(self, "_action_eval_active", False):
-            # Evaluation records its components too, so the ``eval_`` flush in
-            # ``_flush_funaudio_loss_logs`` can report eval_listen_flow_loss and
-            # friends instead of only the scalar ``eval_loss``.
+        if model.training:
             self._record_funaudio_losses(outputs)
         if model.training and not getattr(self, "_action_eval_active", False):
             self._record_funaudio_per_loss_grad_norms(outputs, model=model)

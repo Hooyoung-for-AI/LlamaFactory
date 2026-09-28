@@ -231,8 +231,6 @@ _FUN_AUDIO_CONFIG_KEYS = [
     "speak_flow_loss_weight",
     "listen_flow_steps",
     "speak_flow_steps",
-    "listen_flow_temperature",
-    "speak_flow_temperature",
     "listen_flow_anchor_strength",
     "speak_flow_anchor_strength",
     "codec_decode_context_latents",

@@ -199,6 +199,7 @@ def _get_funaudio_save_config() -> dict[str, Any]:
 
 
 _FUN_AUDIO_CONFIG_KEYS = [
+    "action_flow_condition_ablation",
     "speak_action_history_tokens",
     "enable_action_flow_heads",
     "speak_flow_architecture",

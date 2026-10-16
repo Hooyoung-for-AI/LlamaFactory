@@ -670,6 +670,17 @@ class CustomSeq2SeqTrainer(ActionEvaluationMixin, Seq2SeqTrainer):
             # Never overwrite it with this local training-only buffer, and keep
             # pending training values for the next training log.
             return
+        # Flow losses include DDP zero dependencies from unsupervised batches;
+        # velocity is recorded only when that head received supervision. Expose
+        # both denominators without changing the optimization or old log keys.
+        # These counts, like the buffers below, are LOCAL to this process.
+        for mode in ("listen", "speak"):
+            total = len(self._funaudio_loss_buffer.get(f"{mode}_flow_loss", []))
+            supervised = len(self._funaudio_loss_buffer.get(f"{mode}_flow_velocity", []))
+            if total:
+                logs[f"{mode}_flow_local_batches"] = total
+                logs[f"{mode}_flow_local_supervised_batches"] = supervised
+                logs[f"{mode}_flow_local_supervised_fraction"] = supervised / total
         for key, values in self._funaudio_loss_buffer.items():
             if not values:
                 continue
